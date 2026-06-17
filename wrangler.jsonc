@@ -13,7 +13,7 @@
     {
       "binding": "DB",
       "database_name": "booker",
-      "database_id": "REPLACE_WITH_YOUR_DATABASE_ID",
+      "database_id": "af4a0820-dc98-4270-83a3-bdbf752dcbfc",
       "migrations_dir": "migrations"
     }
   ],
