@@ -28,11 +28,11 @@ export const api = {
 
   getEvent: (id: string) => request<EventDetail>(`/api/events/${id}`),
 
-  addSlot: (id: string, startsAt: number, createdBy: string, adminToken?: string) =>
-    request<{ slot: SlotData }>(`/api/events/${id}/slots`, {
+  addSlots: (id: string, startsAts: number[], createdBy: string, adminToken?: string) =>
+    request<{ slots: SlotData[] }>(`/api/events/${id}/slots`, {
       method: "POST",
       headers: adminToken ? { "x-admin-token": adminToken } : {},
-      body: JSON.stringify({ startsAt, createdBy }),
+      body: JSON.stringify({ startsAts, createdBy }),
     }),
 
   deleteSlot: (id: string, slotId: string, name: string, adminToken?: string) =>

@@ -110,7 +110,11 @@ app.get("/api/events/:id", async (c) => {
   });
 });
 
-/** Propose a new candidate slot. Allowed if the event permits proposals, or by the organiser. */
+/**
+ * Propose one or more candidate days. Accepts a single `startsAt` or a `startsAts`
+ * array, and inserts them all in a single statement so it's atomic — all or nothing.
+ * Allowed if the event permits proposals, or by the organiser.
+ */
 app.post("/api/events/:id/slots", async (c) => {
   const db = drizzle(c.env.DB, { schema });
   const id = c.req.param("id");
@@ -124,15 +128,34 @@ app.post("/api/events/:id/slots", async (c) => {
   }
 
   const body = await c.req.json().catch(() => ({}));
-  const startsAt = Math.round(Number(body.startsAt));
   const createdBy = (body.createdBy ?? "").trim();
-  if (!Number.isFinite(startsAt)) return c.json({ error: "A start time is required" }, 400);
   if (!createdBy) return c.json({ error: "Your name is required" }, 400);
 
-  const slot = { id: shortId(12), eventId: id, startsAt, createdBy, createdAt: Date.now() };
-  await db.insert(schema.slots).values(slot);
+  const input = Array.isArray(body.startsAts)
+    ? body.startsAts
+    : body.startsAt !== undefined
+      ? [body.startsAt]
+      : [];
+  const startsAts: number[] = input.map(Number).filter((n: number) => Number.isFinite(n)).map(Math.round);
+  if (startsAts.length === 0) return c.json({ error: "A day is required" }, 400);
 
-  return c.json({ slot: { id: slot.id, startsAt, createdBy, votes: [] } satisfies SlotData });
+  const now = Date.now();
+  const rows = startsAts.map((startsAt) => ({
+    id: shortId(12),
+    eventId: id,
+    startsAt,
+    createdBy,
+    createdAt: now,
+  }));
+  await db.insert(schema.slots).values(rows); // one statement → atomic
+
+  const slots: SlotData[] = rows.map((r) => ({
+    id: r.id,
+    startsAt: r.startsAt,
+    createdBy,
+    votes: [],
+  }));
+  return c.json({ slots });
 });
 
 /** Delete a slot. Allowed for the organiser, or the person who proposed it (?name=...). */

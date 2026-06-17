@@ -236,9 +236,7 @@ export function EventPage() {
     setBusy(true);
     try {
       setSavedName(name);
-      for (const ts of pending) {
-        await api.addSlot(id, ts, name, adminToken ?? undefined);
-      }
+      await api.addSlots(id, pending, name, adminToken ?? undefined); // atomic
       await load();
       setPending([]);
       setProposing(false);
