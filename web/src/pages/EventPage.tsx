@@ -9,7 +9,7 @@ import {
   clearAdminToken,
 } from "../storage";
 import { formatSlotDay } from "../calendar";
-import type { EventData, EventDetail, SlotData, VoteChoice } from "../types";
+import type { EventDetail, SlotData, VoteChoice } from "../types";
 
 function tally(slot: SlotData) {
   let yes = 0,
@@ -114,6 +114,9 @@ export function EventPage() {
   const [error, setError] = useState<string | null>(null);
 
   const [committedName, setCommittedName] = useState(getSavedName());
+  const [joinDraft, setJoinDraft] = useState(getSavedName());
+  const [joinConflict, setJoinConflict] = useState<string | null>(null); // name already in use
+  const joinRef = useRef<HTMLInputElement>(null);
   const [myVotes, setMyVotes] = useState<Record<string, VoteChoice>>({});
   const [proposing, setProposing] = useState(false);
   const [pending, setPending] = useState<number[]>([]); // staged days, not yet published
@@ -122,6 +125,9 @@ export function EventPage() {
   const [copied, setCopied] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [present, setPresent] = useState<string[]>([]); // who has it open (live)
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set()); // expanded slot rows
+  const [presenceOpen, setPresenceOpen] = useState(false);
+  const presenceRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<number | undefined>(undefined);
   const dirtyRef = useRef(false); // true while we have unsaved local votes
 
@@ -145,10 +151,9 @@ export function EventPage() {
     void load();
   }, [load]);
 
-  // Live updates + presence: poll every few seconds once we know who we are. The
-  // same request is a heartbeat, so others see us as "here" (2-min window, server-side).
+  // Live updates + presence: poll every few seconds. Anonymous viewers poll too
+  // (name="" → no heartbeat recorded), so lurkers still see live state.
   useEffect(() => {
-    if (!name) return;
     let active = true;
     const tick = async () => {
       try {
@@ -167,6 +172,18 @@ export function EventPage() {
       window.clearInterval(iv);
     };
   }, [name, id]);
+
+  // Close the presence popover on an outside click.
+  useEffect(() => {
+    if (!presenceOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (presenceRef.current && !presenceRef.current.contains(e.target as Node)) {
+        setPresenceOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [presenceOpen]);
 
   // Derive this person's saved votes from the server snapshot — but never while we
   // have unsaved local edits, or a poll would wipe a vote that's mid-save.
@@ -217,6 +234,57 @@ export function EventPage() {
     setTimeout(() => setFlash(null), 2500);
   }
 
+  function doJoin(n: string) {
+    setSavedName(n);
+    setCommittedName(n);
+    setJoinConflict(null);
+  }
+
+  // The existing participant whose name matches `n` (case-insensitive), or null.
+  function matchUsedName(n: string): string | null {
+    if (!detail) return null;
+    const names = new Set<string>([detail.event.createdBy]);
+    for (const s of detail.slots) {
+      names.add(s.createdBy);
+      for (const v of s.votes) names.add(v.voterName);
+    }
+    for (const p of present) names.add(p);
+    const lower = n.toLowerCase();
+    for (const u of names) if (u.toLowerCase() === lower) return u;
+    return null;
+  }
+
+  function attemptJoin() {
+    const n = joinDraft.trim();
+    if (!n) return;
+    const existing = matchUsedName(n);
+    if (existing) setJoinConflict(existing); // confirm before taking over an existing name
+    else doJoin(n);
+  }
+
+  function declineConflict() {
+    setJoinConflict(null);
+    setTimeout(() => joinRef.current?.focus(), 0);
+  }
+
+  function toggleExpand(slotId: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(slotId)) next.delete(slotId);
+      else next.add(slotId);
+      return next;
+    });
+  }
+
+  // Voting/proposing needs a name; nudge anonymous viewers to the join box.
+  function requireName(): boolean {
+    if (name) return true;
+    flashMsg("Add your name to vote");
+    joinRef.current?.focus();
+    joinRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+    return false;
+  }
+
   // Auto-save: debounced so rapid clicks collapse into one request. Each save is a
   // full replacement of this person's votes, so the latest map always wins.
   function scheduleSave(votes: Record<string, VoteChoice>) {
@@ -245,6 +313,7 @@ export function EventPage() {
   // Tapping a day on the month calendar steps through none → yes → maybe → none.
   const VOTE_CYCLE: (VoteChoice | undefined)[] = [undefined, "yes", "maybe"];
   function cycleVote(slotId: string) {
+    if (!requireName()) return;
     const current = myVotes[slotId];
     const nextChoice = VOTE_CYCLE[(VOTE_CYCLE.indexOf(current) + 1) % VOTE_CYCLE.length];
     const next = { ...myVotes };
@@ -254,6 +323,7 @@ export function EventPage() {
   }
 
   function startProposing() {
+    if (!requireName()) return;
     setPending([]);
     setProposing(true);
   }
@@ -330,26 +400,22 @@ export function EventPage() {
   if (error || !detail || !merged) return <CenterMsg>{error ?? "Event not found"}</CenterMsg>;
 
   const { event, slots } = merged;
-
-  // Gate: you must say who you are before you can see and vote on the options.
-  if (!name) {
-    return (
-      <NameGate
-        event={event}
-        initial={getSavedName()}
-        onSubmit={(n) => {
-          setSavedName(n);
-          setCommittedName(n);
-        }}
-      />
-    );
-  }
-
-  const canPropose = event.allowProposals || isAdmin;
+  const canPropose = name !== "" && (event.allowProposals || isAdmin);
 
   const allVoters = new Set<string>();
   for (const s of slots) for (const v of s.votes) allVoters.add(v.voterName);
   const voterCount = allVoters.size;
+
+  // Everyone who's taken part (organiser, proposers, voters) or is here now — active first.
+  const presentSet = new Set(present);
+  const everyone = new Set<string>([event.createdBy, ...present, ...allVoters]);
+  for (const s of slots) everyone.add(s.createdBy);
+  const roster = [...everyone].sort((a, b) => {
+    const ap = presentSet.has(a);
+    const bp = presentSet.has(b);
+    if (ap !== bp) return ap ? -1 : 1;
+    return a.localeCompare(b);
+  });
 
   const monthSlots: MonthSlot[] = proposing
     ? [
@@ -370,10 +436,38 @@ export function EventPage() {
       <header className="topbar">
         <a className="brand" href="/">Booker</a>
         <div className="topbar-right">
-          {present.length > 0 && (
-            <div className="presence" title={`Here now: ${present.join(", ")}`}>
-              <span className="live-dot" />
-              <span className="presence-names">{presenceLabel(present, name)}</span>
+          {roster.length > 0 && (
+            <div className="presence-wrap" ref={presenceRef}>
+              <button
+                type="button"
+                className="presence"
+                aria-expanded={presenceOpen}
+                onClick={() => setPresenceOpen((o) => !o)}
+              >
+                <span className={`live-dot${present.length ? "" : " idle"}`} />
+                <span className="presence-names">
+                  {present.length
+                    ? presenceLabel(present, name)
+                    : `${roster.length} ${roster.length === 1 ? "person" : "people"}`}
+                </span>
+              </button>
+              {presenceOpen && (
+                <div className="presence-pop">
+                  <div className="presence-pop-title">On this event</div>
+                  <ul>
+                    {roster.map((u) => {
+                      const active = presentSet.has(u);
+                      return (
+                        <li key={u} className={active ? "active" : ""}>
+                          <span className={`dot${active ? "" : " idle"}`} />
+                          <span className="pop-name">{u === name ? `${u} (you)` : u}</span>
+                          {active && <span className="pop-tag">here now</span>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
             </div>
           )}
           <button type="button" className="share" onClick={share}>
@@ -389,9 +483,11 @@ export function EventPage() {
             All day · organised by {event.createdBy}
             {isAdmin && " · you created this"}
           </p>
-          <p className="voting-as">
-            Voting as <strong>{name}</strong>
-          </p>
+          {name && (
+            <p className="voting-as">
+              Voting as <strong>{name}</strong>
+            </p>
+          )}
           {isAdmin && (
             <p className="share-hint">
               One link for everyone — share this page and each friend just enters their own name to
@@ -399,6 +495,50 @@ export function EventPage() {
             </p>
           )}
         </div>
+
+        {!name &&
+          (joinConflict ? (
+            <div className="card join-bar">
+              <div className="join-copy">
+                <span className="muted">Someone already votes as</span> <strong>{joinConflict}</strong>.{" "}
+                <span className="muted">Is that you?</span>
+              </div>
+              <div className="join-form">
+                <button type="button" className="primary" onClick={() => doJoin(joinConflict)}>
+                  Yes, it's me
+                </button>
+                <button type="button" className="ghost" onClick={declineConflict}>
+                  No, pick another
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="card join-bar">
+              <div className="join-copy">
+                <strong>You're viewing live.</strong>{" "}
+                <span className="muted">Add your name to vote or propose dates.</span>
+              </div>
+              <form
+                className="join-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  attemptJoin();
+                }}
+              >
+                <input
+                  ref={joinRef}
+                  type="text"
+                  aria-label="Your name"
+                  placeholder="Your name"
+                  value={joinDraft}
+                  onChange={(e) => setJoinDraft(e.target.value)}
+                />
+                <button type="submit" className="primary" disabled={!joinDraft.trim()}>
+                  Join
+                </button>
+              </form>
+            </div>
+          ))}
 
         <div className="card">
           <div className="card-title">
@@ -456,7 +596,9 @@ export function EventPage() {
             </span>
           </div>
           <p className="muted">
-            Tap any day — on the calendar or in the list below — to vote. Saves automatically.
+            {name
+              ? "Tap any day — on the calendar or in the list below — to vote. Saves automatically."
+              : "Add your name above to vote on these days."}
           </p>
 
           {slots.length === 0 ? (
@@ -466,10 +608,19 @@ export function EventPage() {
               {slots.map((s) => {
                 const t = tally(s);
                 const mine = myVotes[s.id];
-                const yesNames = s.votes.filter((v) => v.choice === "yes").map((v) => v.voterName);
-                const maybeNames = s.votes.filter((v) => v.choice === "maybe").map((v) => v.voterName);
+                const yesNames = s.votes
+                  .filter((v) => v.choice === "yes")
+                  .map((v) => v.voterName)
+                  .sort();
+                const maybeNames = s.votes
+                  .filter((v) => v.choice === "maybe")
+                  .map((v) => v.voterName)
+                  .sort();
+                const picked = new Set([...yesNames, ...maybeNames]);
+                const cantNames = [...allVoters].filter((n) => !picked.has(n)).sort();
                 const canRemove = isAdmin || name === s.createdBy;
                 const isLeader = leaderIds.has(s.id);
+                const isExpanded = expanded.has(s.id);
                 return (
                   <li
                     key={s.id}
@@ -478,6 +629,18 @@ export function EventPage() {
                   >
                     <div className="slot-main">
                       <div className="slot-when">
+                        <button
+                          type="button"
+                          className="row-expand"
+                          aria-expanded={isExpanded}
+                          title={isExpanded ? "Hide who" : "See who"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleExpand(s.id);
+                          }}
+                        >
+                          {isExpanded ? "⌃" : "⌄"}
+                        </button>
                         {isLeader && (
                           <span className="lead-star" title="Most popular so far">
                             ★
@@ -521,6 +684,29 @@ export function EventPage() {
                         </button>
                       )}
                     </div>
+
+                    {isExpanded && (
+                      <div className="slot-detail" onClick={(e) => e.stopPropagation()}>
+                        <div className="detail-group">
+                          <span className="detail-label t-yes">Going</span>
+                          <span className="detail-names">
+                            {yesNames.length ? yesNames.join(", ") : "—"}
+                          </span>
+                        </div>
+                        {maybeNames.length > 0 && (
+                          <div className="detail-group">
+                            <span className="detail-label t-maybe">Maybe</span>
+                            <span className="detail-names">{maybeNames.join(", ")}</span>
+                          </div>
+                        )}
+                        <div className="detail-group">
+                          <span className="detail-label t-cant">Can't make it</span>
+                          <span className="detail-names">
+                            {cantNames.length ? cantNames.join(", ") : "—"}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </li>
                 );
               })}
@@ -540,52 +726,6 @@ export function EventPage() {
             </button>
           </div>
         )}
-      </main>
-    </div>
-  );
-}
-
-function NameGate({
-  event,
-  initial,
-  onSubmit,
-}: {
-  event: EventData;
-  initial: string;
-  onSubmit: (name: string) => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const trimmed = value.trim();
-
-  function submit() {
-    if (trimmed) onSubmit(trimmed);
-  }
-
-  return (
-    <div className="page">
-      <header className="topbar">
-        <a className="brand" href="/">Booker</a>
-      </header>
-      <main className="container">
-        <div className="card gate">
-          <p className="muted">You've been invited to vote on</p>
-          <h1>{event.name}</h1>
-          <p className="muted">All day · organised by {event.createdBy}</p>
-          <label className="field gate-field">
-            <span>What's your name?</span>
-            <input
-              type="text"
-              autoFocus
-              placeholder="This is how everyone will know it's you"
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && submit()}
-            />
-          </label>
-          <button type="button" className="primary" onClick={submit} disabled={!trimmed}>
-            Continue
-          </button>
-        </div>
       </main>
     </div>
   );
