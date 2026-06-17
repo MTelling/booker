@@ -1,16 +1,44 @@
 import { Hono } from "hono";
 import { drizzle } from "drizzle-orm/d1";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gt, sql } from "drizzle-orm";
 import * as schema from "./db/schema";
 import { shortId, token } from "./lib/id";
 import type { CreateEventInput, SlotData, VoteChoice } from "./types";
 
-type Bindings = { DB: D1Database; ASSETS: Fetcher };
+/** Cloudflare Workers rate-limit binding. */
+interface RateLimiter {
+  limit(options: { key: string }): Promise<{ success: boolean }>;
+}
+
+type Bindings = {
+  DB: D1Database;
+  ASSETS: Fetcher;
+  RATE_LIMIT_API?: RateLimiter;
+  RATE_LIMIT_CREATE?: RateLimiter;
+};
 
 const CHOICES: VoteChoice[] = ["yes", "maybe"];
 const isChoice = (v: unknown): v is VoteChoice => CHOICES.includes(v as VoteChoice);
 
+/** How recently someone must have polled to count as "here". */
+const PRESENCE_WINDOW_MS = 2 * 60 * 1000;
+
+/** Max events one IP may create per UTC day. */
+const DAILY_CREATE_LIMIT = 100;
+
 const app = new Hono<{ Bindings: Bindings }>();
+
+// Best-effort per-IP rate limit on all API traffic (no-op if the binding is absent).
+app.use("/api/*", async (c, next) => {
+  if (c.req.path === "/api/health") return next();
+  const limiter = c.env.RATE_LIMIT_API;
+  if (limiter) {
+    const ip = c.req.header("cf-connecting-ip") ?? "anon";
+    const { success } = await limiter.limit({ key: ip });
+    if (!success) return c.json({ error: "Too many requests. Please slow down." }, 429);
+  }
+  await next();
+});
 
 app.get("/api/health", (c) => c.json({ ok: true }));
 
@@ -23,6 +51,24 @@ app.post("/api/events", async (c) => {
     body = await c.req.json();
   } catch {
     return c.json({ error: "Invalid JSON" }, 400);
+  }
+
+  // Honeypot: hidden fields no real person fills. A bot that fills them is rejected.
+  const honey = body as Record<string, unknown>;
+  const tripped = (k: string) =>
+    typeof honey[k] === "string" && (honey[k] as string).trim() !== "";
+  if (tripped("website") || tripped("hp_url")) {
+    return c.json({ error: "Submission rejected." }, 400);
+  }
+
+  // Stricter per-IP cap on creating events (the main spam vector).
+  const createLimiter = c.env.RATE_LIMIT_CREATE;
+  if (createLimiter) {
+    const ip = c.req.header("cf-connecting-ip") ?? "anon";
+    const { success } = await createLimiter.limit({ key: ip });
+    if (!success) {
+      return c.json({ error: "You're creating events too fast. Try again in a minute." }, 429);
+    }
   }
 
   const name = (body.name ?? "").trim();
@@ -42,6 +88,21 @@ app.post("/api/events", async (c) => {
   const id = shortId(10);
   const adminToken = token();
   const now = Date.now();
+
+  // Daily per-IP volume cap. Atomically bump today's counter and reject past the limit.
+  const ip = c.req.header("cf-connecting-ip") ?? "anon";
+  const day = new Date(now).toISOString().slice(0, 10); // UTC YYYY-MM-DD
+  const counted = await db
+    .insert(schema.createCounts)
+    .values({ ip, day, count: 1 })
+    .onConflictDoUpdate({
+      target: [schema.createCounts.ip, schema.createCounts.day],
+      set: { count: sql`${schema.createCounts.count} + 1` },
+    })
+    .returning({ count: schema.createCounts.count });
+  if ((counted[0]?.count ?? 1) > DAILY_CREATE_LIMIT) {
+    return c.json({ error: "Daily event limit reached for your network. Try again tomorrow." }, 429);
+  }
 
   await db.insert(schema.events).values({
     id,
@@ -69,13 +130,11 @@ app.post("/api/events", async (c) => {
   return c.json({ id, adminToken });
 });
 
-/** Public event detail: event + sorted slots with their votes. */
-app.get("/api/events/:id", async (c) => {
-  const db = drizzle(c.env.DB, { schema });
-  const id = c.req.param("id");
-
+/** Build the public event detail (event + sorted slots with votes), or null if missing. */
+async function loadEventDetail(d1: D1Database, id: string) {
+  const db = drizzle(d1, { schema });
   const ev = await db.select().from(schema.events).where(eq(schema.events.id, id)).get();
-  if (!ev) return c.json({ error: "Event not found" }, 404);
+  if (!ev) return null;
 
   const slotRows = await db.select().from(schema.slots).where(eq(schema.slots.eventId, id)).all();
   const voteRows = await db.select().from(schema.votes).where(eq(schema.votes.eventId, id)).all();
@@ -96,7 +155,7 @@ app.get("/api/events/:id", async (c) => {
       votes: votesBySlot.get(s.id) ?? [],
     }));
 
-  return c.json({
+  return {
     event: {
       id: ev.id,
       name: ev.name,
@@ -107,7 +166,50 @@ app.get("/api/events/:id", async (c) => {
       createdAt: ev.createdAt,
     },
     slots,
-  });
+  };
+}
+
+/** Public event detail: event + sorted slots with their votes. */
+app.get("/api/events/:id", async (c) => {
+  const detail = await loadEventDetail(c.env.DB, c.req.param("id"));
+  if (!detail) return c.json({ error: "Event not found" }, 404);
+  return c.json(detail);
+});
+
+/**
+ * Live sync poll: record that this person is here (presence heartbeat) and return
+ * the fresh snapshot plus everyone currently viewing within the presence window.
+ */
+app.post("/api/events/:id/sync", async (c) => {
+  const db = drizzle(c.env.DB, { schema });
+  const id = c.req.param("id");
+
+  const body = await c.req.json().catch(() => ({}));
+  const name = (body.name ?? "").trim();
+  const now = Date.now();
+
+  if (name) {
+    await db
+      .insert(schema.presence)
+      .values({ eventId: id, name, lastSeenAt: now })
+      .onConflictDoUpdate({
+        target: [schema.presence.eventId, schema.presence.name],
+        set: { lastSeenAt: now },
+      });
+  }
+
+  const detail = await loadEventDetail(c.env.DB, id);
+  if (!detail) return c.json({ error: "Event not found" }, 404);
+
+  const here = await db
+    .select()
+    .from(schema.presence)
+    .where(
+      and(eq(schema.presence.eventId, id), gt(schema.presence.lastSeenAt, now - PRESENCE_WINDOW_MS)),
+    )
+    .all();
+
+  return c.json({ ...detail, present: here.map((p) => p.name).sort() });
 });
 
 /**

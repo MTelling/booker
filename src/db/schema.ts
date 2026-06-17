@@ -1,4 +1,11 @@
-import { sqliteTable, text, integer, index, uniqueIndex } from "drizzle-orm/sqlite-core";
+import {
+  sqliteTable,
+  text,
+  integer,
+  index,
+  uniqueIndex,
+  primaryKey,
+} from "drizzle-orm/sqlite-core";
 
 /** An event being planned: a name + a fixed duration the organiser wants to find a date for. */
 export const events = sqliteTable("events", {
@@ -51,4 +58,26 @@ export const votes = sqliteTable(
     uniqueIndex("votes_slot_voter_idx").on(t.slotId, t.voterName),
     index("votes_event_idx").on(t.eventId),
   ],
+);
+
+/** Per-IP daily event-creation counter, for abuse limiting. One row per IP per UTC day. */
+export const createCounts = sqliteTable(
+  "create_counts",
+  {
+    ip: text("ip").notNull(),
+    day: text("day").notNull(), // UTC YYYY-MM-DD
+    count: integer("count").notNull().default(0),
+  },
+  (t) => [primaryKey({ columns: [t.ip, t.day] })],
+);
+
+/** Lightweight presence: who currently has an event open. Upserted by the sync poll. */
+export const presence = sqliteTable(
+  "presence",
+  {
+    eventId: text("event_id").notNull(),
+    name: text("name").notNull(),
+    lastSeenAt: integer("last_seen_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.eventId, t.name] })],
 );

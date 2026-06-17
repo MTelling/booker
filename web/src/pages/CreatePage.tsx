@@ -18,6 +18,8 @@ export function CreatePage() {
   const [slots, setSlots] = useState<Draft[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [hpWebsite, setHpWebsite] = useState(""); // honeypots — should stay empty
+  const [hpUrl, setHpUrl] = useState("");
 
   const monthSlots: MonthSlot[] = slots.map((s) => ({ id: s.id, startsAt: s.startsAt }));
 
@@ -49,6 +51,8 @@ export function CreatePage() {
         allowProposals,
         createdBy: trimmedBy,
         slots: slots.map((s) => s.startsAt),
+        website: hpWebsite,
+        hp_url: hpUrl,
       });
       setSavedName(trimmedBy);
       setAdminToken(res.id, res.adminToken);
@@ -96,6 +100,30 @@ export function CreatePage() {
             />
             <span>Let friends propose their own dates too</span>
           </label>
+
+          {/* Honeypots — hidden from people, tempting to bots. Must stay empty. */}
+          <div className="hp-field" aria-hidden="true">
+            <label>
+              Website
+              <input
+                type="text"
+                tabIndex={-1}
+                autoComplete="off"
+                value={hpWebsite}
+                onChange={(e) => setHpWebsite(e.target.value)}
+              />
+            </label>
+            <label>
+              Leave this empty
+              <input
+                type="text"
+                tabIndex={-1}
+                autoComplete="off"
+                value={hpUrl}
+                onChange={(e) => setHpUrl(e.target.value)}
+              />
+            </label>
+          </div>
         </div>
 
         <div className="card">

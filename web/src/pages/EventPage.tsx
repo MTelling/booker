@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { MonthCalendar, type MonthSlot } from "../MonthCalendar";
 import { api } from "../api";
@@ -26,6 +26,14 @@ function initials(name: string): string {
   if (parts.length === 0) return "?";
   if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
   return (parts[0]![0]! + parts[parts.length - 1]![0]!).toUpperCase();
+}
+
+/** "you, Mette, Morten +1" — names of people currently viewing, self first. */
+function presenceLabel(names: string[], self: string): string {
+  const ordered = [...names].sort((a, b) => (a === self ? -1 : b === self ? 1 : 0));
+  const shown = ordered.slice(0, 3).map((n) => (n === self ? "you" : n));
+  const extra = ordered.length - shown.length;
+  return shown.join(", ") + (extra > 0 ? ` +${extra}` : "");
 }
 
 /** Stable colour per name, so the same person looks the same on every option. */
@@ -113,7 +121,9 @@ export function EventPage() {
   const [flash, setFlash] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [present, setPresent] = useState<string[]>([]); // who has it open (live)
   const saveTimer = useRef<number | undefined>(undefined);
+  const dirtyRef = useRef(false); // true while we have unsaved local votes
 
   const adminToken = getAdminToken(id);
   const isAdmin = !!adminToken;
@@ -135,9 +145,34 @@ export function EventPage() {
     void load();
   }, [load]);
 
-  // Derive this person's existing votes whenever the data or their name changes.
+  // Live updates + presence: poll every few seconds once we know who we are. The
+  // same request is a heartbeat, so others see us as "here" (2-min window, server-side).
   useEffect(() => {
-    if (!detail) return;
+    if (!name) return;
+    let active = true;
+    const tick = async () => {
+      try {
+        const data = await api.sync(id, name);
+        if (!active) return;
+        setDetail({ event: data.event, slots: data.slots });
+        setPresent(data.present);
+      } catch {
+        /* transient network error — try again next tick */
+      }
+    };
+    void tick();
+    const iv = window.setInterval(tick, 4000);
+    return () => {
+      active = false;
+      window.clearInterval(iv);
+    };
+  }, [name, id]);
+
+  // Derive this person's saved votes from the server snapshot — but never while we
+  // have unsaved local edits, or a poll would wipe a vote that's mid-save.
+  // Layout effect so a returning voter's saved picks paint without a flash.
+  useLayoutEffect(() => {
+    if (!detail || dirtyRef.current) return;
     const next: Record<string, VoteChoice> = {};
     if (name) {
       for (const s of detail.slots) {
@@ -148,11 +183,19 @@ export function EventPage() {
     setMyVotes(next);
   }, [detail, name]);
 
+  // Merge my (possibly unsaved) votes onto the latest server snapshot for display,
+  // so optimistic edits show instantly and polls never erase them.
+  const merged = useMemo(
+    () => (detail ? mergeMyVotes(detail, name, myVotes) : null),
+    [detail, name, myVotes],
+  );
+
   const leaderIds = useMemo(() => {
-    if (!detail || detail.slots.length === 0) return new Set<string>();
+    const ss = merged?.slots ?? [];
+    if (ss.length === 0) return new Set<string>();
     let best = -1;
     let bestTie = -1;
-    for (const s of detail.slots) {
+    for (const s of ss) {
       const t = tally(s);
       if (t.yes > best || (t.yes === best && t.yes + t.maybe > bestTie)) {
         best = t.yes;
@@ -161,13 +204,13 @@ export function EventPage() {
     }
     const ids = new Set<string>();
     if (best > 0) {
-      for (const s of detail.slots) {
+      for (const s of ss) {
         const t = tally(s);
         if (t.yes === best && t.yes + t.maybe === bestTie) ids.add(s.id);
       }
     }
     return ids;
-  }, [detail]);
+  }, [merged]);
 
   function flashMsg(msg: string) {
     setFlash(msg);
@@ -183,19 +226,19 @@ export function EventPage() {
       try {
         setSavedName(name);
         await api.saveVotes(id, name, votes);
+        dirtyRef.current = false; // server now matches us
         setSaveState("saved");
         window.setTimeout(() => setSaveState((s) => (s === "saved" ? "idle" : s)), 1500);
       } catch (e) {
         setSaveState("error");
         flashMsg(e instanceof Error ? e.message : "Could not save");
-        void load(); // resync from server on failure
       }
     }, 450);
   }
 
   function commitVotes(next: Record<string, VoteChoice>) {
-    setMyVotes(next);
-    setDetail((d) => (d ? mergeMyVotes(d, name, next) : d)); // instant UI update
+    dirtyRef.current = true;
+    setMyVotes(next); // `merged` reflects this instantly in the UI
     scheduleSave(next);
   }
 
@@ -284,9 +327,9 @@ export function EventPage() {
   }
 
   if (loading) return <CenterMsg>Loading…</CenterMsg>;
-  if (error || !detail) return <CenterMsg>{error ?? "Event not found"}</CenterMsg>;
+  if (error || !detail || !merged) return <CenterMsg>{error ?? "Event not found"}</CenterMsg>;
 
-  const { event, slots } = detail;
+  const { event, slots } = merged;
 
   // Gate: you must say who you are before you can see and vote on the options.
   if (!name) {
@@ -326,9 +369,17 @@ export function EventPage() {
     <div className="page">
       <header className="topbar">
         <a className="brand" href="/">Booker</a>
-        <button type="button" className="share" onClick={share}>
-          {copied ? "Link copied ✓" : "Copy share link"}
-        </button>
+        <div className="topbar-right">
+          {present.length > 0 && (
+            <div className="presence" title={`Here now: ${present.join(", ")}`}>
+              <span className="live-dot" />
+              <span className="presence-names">{presenceLabel(present, name)}</span>
+            </div>
+          )}
+          <button type="button" className="share" onClick={share}>
+            {copied ? "Link copied ✓" : "Copy share link"}
+          </button>
+        </div>
       </header>
 
       <main className="container">
@@ -405,7 +456,7 @@ export function EventPage() {
             </span>
           </div>
           <p className="muted">
-            Tap days on the calendar above — your answer saves automatically.
+            Tap any day — on the calendar or in the list below — to vote. Saves automatically.
           </p>
 
           {slots.length === 0 ? (
@@ -420,7 +471,11 @@ export function EventPage() {
                 const canRemove = isAdmin || name === s.createdBy;
                 const isLeader = leaderIds.has(s.id);
                 return (
-                  <li key={s.id} className={`slot-row${isLeader ? " leader" : ""}`}>
+                  <li
+                    key={s.id}
+                    className={`slot-row clickable${isLeader ? " leader" : ""}`}
+                    onClick={() => cycleVote(s.id)}
+                  >
                     <div className="slot-main">
                       <div className="slot-when">
                         {isLeader && (
@@ -457,7 +512,10 @@ export function EventPage() {
                           type="button"
                           className="row-remove"
                           title="Remove this option"
-                          onClick={() => removeSlot(s)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeSlot(s);
+                          }}
                         >
                           ×
                         </button>

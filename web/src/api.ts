@@ -17,6 +17,9 @@ export interface CreateEventBody {
   allowProposals: boolean;
   createdBy: string;
   slots: number[];
+  // Honeypot fields — always empty for real users.
+  website?: string;
+  hp_url?: string;
 }
 
 export const api = {
@@ -27,6 +30,13 @@ export const api = {
     }),
 
   getEvent: (id: string) => request<EventDetail>(`/api/events/${id}`),
+
+  /** Live poll: refreshes data and records presence; returns who's currently here. */
+  sync: (id: string, name: string) =>
+    request<EventDetail & { present: string[] }>(`/api/events/${id}/sync`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
 
   addSlots: (id: string, startsAts: number[], createdBy: string, adminToken?: string) =>
     request<{ slots: SlotData[] }>(`/api/events/${id}/slots`, {

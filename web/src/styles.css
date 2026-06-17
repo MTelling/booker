@@ -82,6 +82,60 @@ h2 {
   font-size: 0.85rem;
 }
 
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  min-width: 0;
+}
+.presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  min-width: 0;
+  max-width: 42vw;
+}
+.presence-names {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.live-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: livePulse 2s ease-out infinite;
+}
+@keyframes livePulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(24, 128, 56, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 6px rgba(24, 128, 56, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(24, 128, 56, 0);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+}
+
+/* honeypot: present in the DOM, invisible & unfocusable for real users */
+.hp-field {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
 .share {
   border: 1px solid var(--line);
   background: var(--bg);
@@ -361,6 +415,17 @@ h2 {
 .slot-row.leader {
   border-color: var(--green);
   background: #f4fbf6;
+}
+.slot-row.clickable {
+  cursor: pointer;
+}
+.slot-row.clickable:hover {
+  border-color: var(--blue);
+  background: #f7faff;
+}
+.slot-row.clickable.leader:hover {
+  border-color: var(--green);
+  background: #eef9f1;
 }
 
 .slot-main {

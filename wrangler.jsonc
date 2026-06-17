@@ -19,5 +19,22 @@
   ],
   "observability": {
     "enabled": true
+  },
+  // Per-IP rate limiting (Cloudflare Workers rate-limit bindings). period is 10 or 60s.
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "RATE_LIMIT_API",
+        "type": "ratelimit",
+        "namespace_id": "1001",
+        "simple": { "limit": 200, "period": 60 }
+      },
+      {
+        "name": "RATE_LIMIT_CREATE",
+        "type": "ratelimit",
+        "namespace_id": "1002",
+        "simple": { "limit": 6, "period": 60 }
+      }
+    ]
   }
 }
