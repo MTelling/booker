@@ -68,8 +68,10 @@ export function MonthCalendar({ slots, addMode, onDayAdd, onSlotClick, initialDa
           const isOption = !!slot;
           const locked = !!slot?.locked;
           const pending = !!slot?.pending;
-          const canAdd = addMode && inMonth && !isOption;
-          const clickable = inMonth && ((isOption && !locked) || canAdd);
+          // Spill-over days (other months) are still fully clickable — only their
+          // styling is muted, so you can pick e.g. the 1st of next month directly.
+          const canAdd = addMode && !isOption;
+          const clickable = (isOption && !locked) || canAdd;
 
           const fill = !isOption
             ? ""
@@ -98,7 +100,6 @@ export function MonthCalendar({ slots, addMode, onDayAdd, onSlotClick, initialDa
               key={day.toISOString()}
               className={classes}
               onClick={() => {
-                if (!inMonth) return;
                 if (isOption && slot && !locked) onSlotClick?.(slot);
                 else if (canAdd) onDayAdd?.(timestampFor(day, 0));
               }}
